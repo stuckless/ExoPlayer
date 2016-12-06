@@ -29,6 +29,13 @@ import com.google.android.exoplayer2.util.MimeTypes;
  * Decodes and renders audio using FFmpeg.
  */
 public final class FfmpegAudioRenderer extends SimpleDecoderAudioRenderer {
+  /**
+   * static variable that can be toggled to temporarily disable FFMPEG Audio Render
+   * The usefulness comes in that sometimes you might have the ffmpeg plugin loaded in the app
+   * but you don't want to use it.  This allows an application to turn it off.
+   */
+  public static boolean FFMPEG_DISABLED = false;
+
 
   private static final int NUM_BUFFERS = 16;
   private static final int INITIAL_INPUT_BUFFER_SIZE = 960 * 6;
@@ -51,8 +58,8 @@ public final class FfmpegAudioRenderer extends SimpleDecoderAudioRenderer {
   }
 
   @Override
-  protected int supportsFormatInternal(Format format) {
-    if (!FfmpegLibrary.isAvailable()) {
+  public int supportsFormatInternal(Format format) {
+    if (FFMPEG_DISABLED || !FfmpegLibrary.isAvailable()) {
       return FORMAT_UNSUPPORTED_TYPE;
     }
     String mimeType = format.sampleMimeType;
