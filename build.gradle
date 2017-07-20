@@ -51,7 +51,8 @@ allprojects {
         // allows you to override the version on the commandline
         // useful for building snapshots
         // #./gradlew -Dexoplayer.version=r2.0.4-SNAPSHOT assemble publishToMavenLocal
-        releaseVersion = System.getProperty('exoplayer.version','r2.0.4')
+        sagetvExoVersion = 'r2.4.4'
+        releaseVersion = System.getProperty('exoplayer.version', sagetvExoVersion)
         releaseWebsite = 'https://github.com/google/ExoPlayer'
     }
     if (it.hasProperty('externalBuildDir')) {

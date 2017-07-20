@@ -111,7 +111,6 @@ public final class TsExtractor implements Extractor {
   @Mode private final int mode;
   private final List<TimestampAdjuster> timestampAdjusters;
   private final ParsableByteArray tsPacketBuffer;
-  private final ParsableBitArray tsScratch;
   private final SparseIntArray continuityCounters;
   private final TsPayloadReader.Factory payloadReaderFactory;
   private final SparseArray<TsPayloadReader> tsPayloadReaders; // Indexed by pid
@@ -164,7 +163,6 @@ public final class TsExtractor implements Extractor {
       timestampAdjusters.add(timestampAdjuster);
     }
     tsPacketBuffer = new ParsableByteArray(BUFFER_SIZE);
-    tsScratch = new ParsableBitArray(new byte[3]);
     trackIds = new SparseBooleanArray();
     tsPayloadReaders = new SparseArray<>();
     continuityCounters = new SparseIntArray();
@@ -250,24 +248,23 @@ public final class TsExtractor implements Extractor {
       return RESULT_CONTINUE;
     }
 
-    tsPacketBuffer.skipBytes(1);
-    tsPacketBuffer.readBytes(tsScratch, 3);
-    if (tsScratch.readBit()) { // transport_error_indicator
+    int tsPacketHeader = tsPacketBuffer.readInt();
+    if ((tsPacketHeader & 0x800000) != 0) { // transport_error_indicator
       // There are uncorrectable errors in this packet.
       tsPacketBuffer.setPosition(endOfPacket);
       return RESULT_CONTINUE;
     }
-    boolean payloadUnitStartIndicator = tsScratch.readBit();
-    tsScratch.skipBits(1); // transport_priority
-    int pid = tsScratch.readBits(13);
-    tsScratch.skipBits(2); // transport_scrambling_control
-    boolean adaptationFieldExists = tsScratch.readBit();
-    boolean payloadExists = tsScratch.readBit();
+    boolean payloadUnitStartIndicator = (tsPacketHeader & 0x400000) != 0;
+    // Ignoring transport_priority (tsPacketHeader & 0x200000)
+    int pid = (tsPacketHeader & 0x1FFF00) >> 8;
+    // Ignoring transport_scrambling_control (tsPacketHeader & 0xC0)
+    boolean adaptationFieldExists = (tsPacketHeader & 0x20) != 0;
+    boolean payloadExists = (tsPacketHeader & 0x10) != 0;
 
     // Discontinuity check.
     boolean discontinuityFound = false;
-    int continuityCounter = tsScratch.readBits(4);
     if (mode != MODE_HLS) {
+      int continuityCounter = tsPacketHeader & 0xF;
       int previousCounter = continuityCounters.get(pid, continuityCounter - 1);
       continuityCounters.put(pid, continuityCounter);
       if (previousCounter == continuityCounter) {
@@ -276,7 +273,7 @@ public final class TsExtractor implements Extractor {
           tsPacketBuffer.setPosition(endOfPacket);
           return RESULT_CONTINUE;
         }
-      } else if (continuityCounter != (previousCounter + 1) % 16) {
+      } else if (continuityCounter != ((previousCounter + 1) & 0xF)) {
         discontinuityFound = true;
       }
     }
@@ -296,7 +293,6 @@ public final class TsExtractor implements Extractor {
         }
         tsPacketBuffer.setLimit(endOfPacket);
         payloadReader.consume(tsPacketBuffer, payloadUnitStartIndicator);
-        Assertions.checkState(tsPacketBuffer.getPosition() <= endOfPacket);
         tsPacketBuffer.setLimit(limit);
       }
     }
@@ -382,10 +378,14 @@ public final class TsExtractor implements Extractor {
     private static final int TS_PMT_DESC_DVBSUBS = 0x59;
 
     private final ParsableBitArray pmtScratch;
+    private final SparseArray<TsPayloadReader> trackIdToReaderScratch;
+    private final SparseIntArray trackIdToPidScratch;
     private final int pid;
 
     public PmtReader(int pid) {
       pmtScratch = new ParsableBitArray(new byte[5]);
+      trackIdToReaderScratch = new SparseArray<>();
+      trackIdToPidScratch = new SparseIntArray();
       this.pid = pid;
     }
 
@@ -436,6 +436,8 @@ public final class TsExtractor implements Extractor {
             new TrackIdGenerator(programNumber, TS_STREAM_TYPE_ID3, MAX_PID_PLUS_ONE));
       }
 
+      trackIdToReaderScratch.clear();
+      trackIdToPidScratch.clear();
       int remainingEntriesLength = sectionData.bytesLeft();
       while (remainingEntriesLength > 0) {
         sectionData.readBytes(pmtScratch, 5);
@@ -454,23 +456,30 @@ public final class TsExtractor implements Extractor {
         if (trackIds.get(trackId)) {
           continue;
         }
-        trackIds.put(trackId, true);
 
-        TsPayloadReader reader;
-        if (mode == MODE_HLS && streamType == TS_STREAM_TYPE_ID3) {
-          reader = id3Reader;
-        } else {
-          reader = payloadReaderFactory.createPayloadReader(streamType, esInfo);
-          if (reader != null) {
+        TsPayloadReader reader = mode == MODE_HLS && streamType == TS_STREAM_TYPE_ID3 ? id3Reader
+            : payloadReaderFactory.createPayloadReader(streamType, esInfo);
+        if (mode != MODE_HLS
+            || elementaryPid < trackIdToPidScratch.get(trackId, MAX_PID_PLUS_ONE)) {
+          trackIdToPidScratch.put(trackId, elementaryPid);
+          trackIdToReaderScratch.put(trackId, reader);
+        }
+      }
+
+      int trackIdCount = trackIdToPidScratch.size();
+      for (int i = 0; i < trackIdCount; i++) {
+        int trackId = trackIdToPidScratch.keyAt(i);
+        trackIds.put(trackId, true);
+        TsPayloadReader reader = trackIdToReaderScratch.valueAt(i);
+        if (reader != null) {
+          if (reader != id3Reader) {
             reader.init(timestampAdjuster, output,
                 new TrackIdGenerator(programNumber, trackId, MAX_PID_PLUS_ONE));
           }
-        }
-
-        if (reader != null) {
-          tsPayloadReaders.put(elementaryPid, reader);
+          tsPayloadReaders.put(trackIdToPidScratch.valueAt(i), reader);
         }
       }
+
       if (mode == MODE_HLS) {
         if (!tracksEnded) {
           output.endTracks();
